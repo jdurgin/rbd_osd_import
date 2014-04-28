@@ -116,7 +116,7 @@ def get_pool_paths(pool_id, object_list_file):
     paths = {}
     for line in object_list_file.readlines():
         host, _, fullpath = line.strip().split(' ', 2)
-        pool_prefix = 'current/' + pool_id
+        pool_prefix = 'current/' + pool_id + '.'
         # ignore snapshots
         if pool_prefix in fullpath and '__head' in fullpath:
             end = host.find('.osd')
