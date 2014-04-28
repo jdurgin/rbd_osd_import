@@ -14,26 +14,42 @@ import os.path
 import paramiko
 import Queue
 import rados
+import random
 import rbd
 import struct
 import tempfile
 import threading
+import time
 
-def read_remote_file(lock, connections, user, hostname, fullpath):
+def read_remote_file(log, lock, connections, user, host_paths):
     """
-    :param hostname: the host from which to read
-    :type hostname: string
-    :param fullpath: path to file to read
-    :type fullpath: string
+    :param host_paths: tuples of hostname, fullpath
+    :type fullpath: list of tuples
     :returns: string - contents of file
     """
-    conn = get_or_create_host_connection(lock, connections, user, hostname)
-    sftp_client = conn.open_sftp()
-    with tempfile.NamedTemporaryFile() as temp:
-        sftp_client.get(fullpath, temp.name)
-        sftp_client.close()
-        temp.seek(0)
-        return temp.read()
+    tries = 0
+    while True:
+        try:
+            hostname, fullpath = random.choice(host_paths)
+            conn = get_or_create_host_connection(lock, connections, user, hostname)
+            sftp_client = conn.open_sftp()
+            with tempfile.NamedTemporaryFile() as temp:
+                sftp_client.get(fullpath, temp.name)
+                sftp_client.close()
+                temp.seek(0)
+                return temp.read()
+        except IOError:
+            if len(host_paths) == 1:
+                log.error("all locations for %s returned an IOError", os.path.basename(fullpath))
+                raise
+            log.debug('error reading %s:%s, trying another path',
+                      hostname, fullpath, exc_info=True)
+            host_paths = [(host, path) for host, path in host_paths if path != fullpath or host != hostname]
+        except Exception:
+            if tries > 10:
+                raise
+            tries += 1
+            time.sleep(0.1)
 
 class RestoreImage(threading.Thread):
     def __init__(self, log, lock, connections, pool_name, user, q, result_q):
@@ -72,14 +88,15 @@ class RestoreImage(threading.Thread):
                     pass
                 with rbd.Image(ioctx, image_name) as image:
                     num_objs = len(paths)
-                    for i, (host, path) in enumerate(paths):
-                        self.log.info('restoring object %s:%s, %d/%d in image %s', host, path, i, num_objs, image_name)
-                        data = read_remote_file(self.lock,
+                    for i, host_paths in enumerate(paths):
+                        obj_filename = os.path.basename(host_paths[0][1])
+                        self.log.info('restoring object %s, %d/%d in image %s', obj_filename, i, num_objs, image_name)
+                        data = read_remote_file(self.log,
+                                                self.lock,
                                                 self.connections,
                                                 self.user,
-                                                host,
-                                                path)
-                        offset = rbd_block_offset(block_name_prefix, order, path)
+                                                host_paths)
+                        offset = rbd_block_offset(block_name_prefix, order, obj_filename)
                         image.write(data, offset)
 
 def parse_rbd_header(header_contents):
@@ -96,14 +113,13 @@ def parse_rbd_header(header_contents):
     size = unpacked[8]
     return prefix, order, size
 
-def rbd_block_offset(block_name_prefix, order, fullpath):
+def rbd_block_offset(block_name_prefix, order, basename):
     """
-    :param fullpath: path to file to read
-    :type fullpath: string
+    :param basename: path to file to read
+    :type basename: string
     :returns: offset where offset is the offset of the object into the image in bytes
     Names are <prefix>.<offset>
     """
-    basename = os.path.basename(fullpath)
     obj_num = int(basename[len(block_name_prefix) + 1:len(block_name_prefix) + 13], 16)
     return obj_num * 2**order
 
@@ -121,18 +137,18 @@ def get_pool_paths(pool_id, object_list_file):
             end = host.find('.osd')
             if end != -1:
                 host = host[:end]
-            paths[os.path.basename(fullpath)] = (host, fullpath)
+            paths.setdefault(os.path.basename(fullpath), [])
+            paths[os.path.basename(fullpath)].append((host, fullpath))
     return paths.values()
 
 def get_rbd_header_paths(paths):
-    return [(host, path) for host, path in paths if '.rbd' in path]
+    return [host_paths for host_paths in paths if '.rbd' in host_paths[0][1]]
 
 def get_rbd_data_paths(paths, block_name_prefix):
-    return [(host, path) for host, path in paths if block_name_prefix in path]
+    return [host_paths for host_paths in paths if block_name_prefix in host_paths[0][1]]
 
 def connect_to_host(user, hostname):
     ssh = paramiko.SSHClient()
-    print 'user = ', user, 'host = ', hostname
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.load_system_host_keys()
     ssh.connect(hostname=hostname,
@@ -238,9 +254,9 @@ def main():
     q = Queue.Queue()
     result_q = Queue.Queue()
     lock = threading.Lock()
-    for i, (host, fullpath) in enumerate(headers_in_pool):
-        image_name = image_name_from_header_path(fullpath)
-        header = read_remote_file(lock, connections, args.user, host, fullpath)
+    for i, host_paths in enumerate(headers_in_pool):
+        image_name = image_name_from_header_path(host_paths[0][1])
+        header = read_remote_file(log, lock, connections, args.user, host_paths)
         block_name_prefix, order, size = parse_rbd_header(header)
         log.info('RBD image header for %s:', image_name)
         log.info('\tblock_name_prefix: %s', block_name_prefix)
