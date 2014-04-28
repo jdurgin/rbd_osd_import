@@ -37,7 +37,12 @@ def restore_rbd_image(log, connections, pool_name, user, paths,
     with rados.Rados(conffile='') as cluster:
         with cluster.open_ioctx(pool_name) as ioctx:
             log.info('Creating image %s', image_name)
-            rbd.RBD().create(ioctx, image_name, size, order=order)
+            try:
+                rbd.RBD().create(ioctx, image_name, size, order=order)
+            except ImageExists:
+                # if the image already existed from an earlier run,
+                # try to restore the rest of it for idempotency
+                pass
             with rbd.Image(ioctx, image_name) as image:
                 num_objs = len(paths)
                 for i, (host, path) in enumerate(paths):
