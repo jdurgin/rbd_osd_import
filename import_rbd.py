@@ -218,6 +218,11 @@ def parse_args():
         nargs=1,
         help='which pool to restore',
     )
+    parser.add_argument(
+        'images',
+        nargs='*',
+        help='if specified, only restore the given images',
+        )
     return parser.parse_args()
 
 def main():
@@ -256,6 +261,8 @@ def main():
     lock = threading.Lock()
     for i, host_paths in enumerate(headers_in_pool):
         image_name = image_name_from_header_path(host_paths[0][1])
+        if args.images and image_name not in args.images:
+            continue
         header = read_remote_file(log, lock, connections, args.user, host_paths)
         block_name_prefix, order, size = parse_rbd_header(header)
         log.info('RBD image header for %s:', image_name)
