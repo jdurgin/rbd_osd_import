@@ -11,12 +11,14 @@ import getpass
 import logging
 import os.path
 import paramiko
+import Queue
 import rados
 import rbd
 import struct
 import tempfile
+import threading
 
-def read_remote_file(connections, user, hostname, fullpath):
+def read_remote_file(lock, connections, user, hostname, fullpath):
     """
     :param hostname: the host from which to read
     :type hostname: string
@@ -24,7 +26,7 @@ def read_remote_file(connections, user, hostname, fullpath):
     :type fullpath: string
     :returns: string - contents of file
     """
-    conn = get_or_create_host_connection(connections, user, hostname)
+    conn = get_or_create_host_connection(lock, connections, user, hostname)
     sftp_client = conn.open_sftp()
     with tempfile.NamedTemporaryFile() as temp:
         sftp_client.get(fullpath, temp.name)
@@ -32,24 +34,53 @@ def read_remote_file(connections, user, hostname, fullpath):
         temp.seek(0)
         return temp.read()
 
-def restore_rbd_image(log, connections, pool_name, user, paths,
-                      image_name, block_name_prefix, order, size):
-    with rados.Rados(conffile='') as cluster:
-        with cluster.open_ioctx(pool_name) as ioctx:
-            log.info('Creating image %s', image_name)
+class RestoreImage(threading.Thread):
+    def __init__(self, log, lock, connections, pool_name, user, q, result_q):
+        super(RestoreImage, self).__init__()
+        self.log = log
+        self.lock = lock
+        self.connections = connections
+        self.pool_name = pool_name
+        self.user = user
+        self.q = q
+        self.result_q = result_q
+
+    def run(self):
+        while True:
             try:
-                rbd.RBD().create(ioctx, image_name, size, order=order)
-            except rbd.ImageExists:
-                # if the image already existed from an earlier run,
-                # try to restore the rest of it for idempotency
-                pass
-            with rbd.Image(ioctx, image_name) as image:
-                num_objs = len(paths)
-                for i, (host, path) in enumerate(paths):
-                    log.info('restoring object %d/%d', i, num_objs)
-                    data = read_remote_file(connections, user, host, path)
-                    offset = rbd_block_offset(block_name_prefix, order, path)
-                    image.write(data, offset)
+                item = self.q.get()
+                if item is None:
+                    self.result_q.put(None)
+                    return
+                paths, image_name, block_name_prefix, order, size = item
+                self.restore_image(paths, image_name, block_name_prefix, order, size)
+                self.result_q.put(image_name)
+            except Exception as e:
+                self.log.exception('error restoring image')
+                self.result_q.put(e)
+                return
+
+    def restore_image(self, paths, image_name, block_name_prefix, order, size):
+        with rados.Rados(conffile='') as cluster:
+            with cluster.open_ioctx(self.pool_name) as ioctx:
+                self.log.info('Creating image %s', image_name)
+                try:
+                    rbd.RBD().create(ioctx, image_name, size, order=order)
+                except rbd.ImageExists:
+                    # if the image already existed from an earlier run,
+                    # try to restore the rest of it for idempotency
+                    pass
+                with rbd.Image(ioctx, image_name) as image:
+                    num_objs = len(paths)
+                    for i, (host, path) in enumerate(paths):
+                        self.log.info('restoring object %d/%d', i, num_objs)
+                        data = read_remote_file(self.lock,
+                                                self.connections,
+                                                self.user,
+                                                host,
+                                                path)
+                        offset = rbd_block_offset(block_name_prefix, order, path)
+                        image.write(data, offset)
 
 def parse_rbd_header(header_contents):
     """
@@ -87,7 +118,10 @@ def get_pool_paths(pool_id, object_list_file):
         pool_prefix = 'current/' + pool_id
         # ignore snapshots
         if pool_prefix in fullpath and '__head' in fullpath:
-            paths[os.path.basename(fullpath)] = (host[:host.find('.osd')], fullpath)
+            end = host.find('.osd')
+            if end != -1:
+                host = host[:end]
+            paths[os.path.basename(fullpath)] = (host, fullpath)
     return paths.values()
 
 def get_rbd_header_paths(paths):
@@ -98,6 +132,7 @@ def get_rbd_data_paths(paths, block_name_prefix):
 
 def connect_to_host(user, hostname):
     ssh = paramiko.SSHClient()
+    print 'user = ', user, 'host = ', hostname
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.load_system_host_keys()
     ssh.connect(hostname=hostname,
@@ -106,10 +141,11 @@ def connect_to_host(user, hostname):
     ssh.get_transport().set_keepalive(True)
     return ssh
 
-def get_or_create_host_connection(connections, user, hostname):
-    if hostname not in connections or not connections[hostname].get_transport().is_alive():
-        connections[hostname] = connect_to_host(user, hostname)
-    return connections[hostname]
+def get_or_create_host_connection(lock, connections, user, hostname):
+    with lock:
+        if hostname not in connections or not connections[hostname].get_transport().is_alive():
+            connections[hostname] = connect_to_host(user, hostname)
+        return connections[hostname]
 
 def get_pool_id(pool_file, pool_name):
     for line in pool_file.readlines():
@@ -156,6 +192,12 @@ def parse_args():
         help='where to store log output',
         )
     parser.add_argument(
+        '--num-workers',
+        type=int,
+        default=1,
+        help='how many images to restore in parallel threads',
+        )
+    parser.add_argument(
         'pool',
         nargs=1,
         help='which pool to restore',
@@ -190,20 +232,47 @@ def main():
     paths_for_pool = get_pool_paths(pool_id, args.object_list)
     headers_in_pool = get_rbd_header_paths(paths_for_pool)
     num_images = len(headers_in_pool)
+    q = Queue.Queue()
+    result_q = Queue.Queue()
+    lock = threading.Lock()
     for i, (host, fullpath) in enumerate(headers_in_pool):
         image_name = image_name_from_header_path(fullpath)
-        log.info('Restoring image %s (%d/%d)', image_name, i, num_images)
-        header = read_remote_file(connections, args.user, host, fullpath)
+        header = read_remote_file(lock, connections, args.user, host, fullpath)
         block_name_prefix, order, size = parse_rbd_header(header)
+        log.info('RBD image header for %s:', image_name)
         log.info('\tblock_name_prefix: %s', block_name_prefix)
         log.info('\torder: %d', order)
         log.info('\tsize: %d bytes', size)
-
         data_paths = get_rbd_data_paths(paths_for_pool, block_name_prefix)
-        restore_rbd_image(log, connections, pool_name, args.user,
-                          data_paths, image_name, block_name_prefix,
-                          order, size)
-    log.info('Finished restoring pool %s', pool_name)
+        q.put([data_paths, image_name, block_name_prefix, order, size])
+
+    for i in xrange(args.num_workers):
+        q.put(None)
+
+    threads = [RestoreImage(log, lock, connections, pool_name, args.user, q, result_q) for i in xrange(args.num_workers)]
+    for thread in threads:
+        thread.start()
+
+    i = 0
+    finished = 0
+    errors = 0
+    while finished < args.num_workers:
+        item = result_q.get()
+        if item is None:
+            finished += 1
+            continue
+        if isinstance(item, Exception):
+            finished += 1
+            errors += 1
+            continue
+        i += 1
+        log.info('Finished restoring image %s (%d/%d)',
+                 image_name, i, num_images)
+
+    if errors > 0:
+        log.error('Failed to restore %d images (see log for details)', errors)
+    else:
+        log.info('Finished restoring all images in pool %s', pool_name)
 
 if __name__ == '__main__':
     main()
