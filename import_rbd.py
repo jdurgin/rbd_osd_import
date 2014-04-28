@@ -78,7 +78,7 @@ def rbd_block_offset(block_name_prefix, order, fullpath):
 
 def image_name_from_header_path(fullpath):
     basename = os.path.basename(fullpath)
-    return basename[:basename.find('.rbd')]
+    return basename[:basename.find('.rbd__head')]
 
 def get_pool_paths(pool_id, object_list_file):
     paths = {}
