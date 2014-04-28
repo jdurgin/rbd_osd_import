@@ -73,7 +73,7 @@ def rbd_block_offset(block_name_prefix, order, fullpath):
     Names are <prefix>.<offset>
     """
     basename = os.path.basename(fullpath)
-    obj_num = int(basename[len(block_name_prefix) + 1:len(block_name_prefix) + 13])
+    obj_num = int(basename[len(block_name_prefix) + 1:len(block_name_prefix) + 13], 16)
     return obj_num * 2**order
 
 def image_name_from_header_path(fullpath):
