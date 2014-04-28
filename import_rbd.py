@@ -39,7 +39,7 @@ def restore_rbd_image(log, connections, pool_name, user, paths,
             log.info('Creating image %s', image_name)
             try:
                 rbd.RBD().create(ioctx, image_name, size, order=order)
-            except ImageExists:
+            except rbd.ImageExists:
                 # if the image already existed from an earlier run,
                 # try to restore the rest of it for idempotency
                 pass
