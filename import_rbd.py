@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """
 Pool mapping file should have the form:
-<poolid>\t<pool_name>
+<poolid> <pool_name>
 
 Object mapping file should have the form:
-<host>\t<fullpath>
+<host> <ignored> <fullpath>
 """
 import argparse
 import getpass
