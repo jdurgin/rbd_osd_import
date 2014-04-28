@@ -74,7 +74,7 @@ class RestoreImage(threading.Thread):
                 with rbd.Image(ioctx, image_name) as image:
                     num_objs = len(paths)
                     for i, (host, path) in enumerate(paths):
-                        self.log.info('restoring object %d/%d', i, num_objs)
+                        self.log.info('restoring object %s:%s, %d/%d in image %s', host, path, i, num_objs, image_name)
                         data = read_remote_file(self.lock,
                                                 self.connections,
                                                 self.user,
@@ -271,7 +271,7 @@ def main():
             continue
         i += 1
         log.info('Finished restoring image %s (%d/%d)',
-                 image_name, i, num_images)
+                 item, i, num_images)
 
     if errors > 0:
         log.error('Failed to restore %d images (see log for details)', errors)
