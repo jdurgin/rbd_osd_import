@@ -57,9 +57,8 @@ class RestoreImage(threading.Thread):
                 self.restore_image(paths, image_name, block_name_prefix, order, size)
                 self.result_q.put(image_name)
             except Exception as e:
-                self.log.exception('error restoring image')
                 self.result_q.put(e)
-                return
+                self.log.exception('error restoring image %s', image_name)
 
     def restore_image(self, paths, image_name, block_name_prefix, order, size):
         with rados.Rados(conffile='') as cluster:
@@ -266,7 +265,6 @@ def main():
             finished += 1
             continue
         if isinstance(item, Exception):
-            finished += 1
             errors += 1
             continue
         i += 1
