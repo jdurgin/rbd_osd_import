@@ -9,6 +9,7 @@ Object mapping file should have the form:
 import argparse
 import getpass
 import logging
+import logging.handlers
 import os.path
 import paramiko
 import Queue
@@ -208,11 +209,14 @@ def main():
     args = parse_args()
     log = logging.getLogger()
     log_level = logging.INFO
+    lib_log_level = logging.WARN
     if args.verbose:
         log_level = logging.DEBUG
+        lib_log_level = logging.DEBUG
     logging.basicConfig(level=log_level)
+    logging.getLogger('paramiko').setLevel(lib_log_level)
     if args.log_file is not None:
-        handler = logging.handlers.FileHandler(
+        handler = logging.handlers.WatchedFileHandler(
             filename=args.log_file,
             )
         formatter = logging.Formatter(
