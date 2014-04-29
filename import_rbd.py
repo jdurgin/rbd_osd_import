@@ -126,7 +126,7 @@ class RestoreImage(threading.Thread):
 
 class DeleteOldImage(threading.Thread):
     def __init__(self, log, lock, connections, pool_name, user, q, result_q):
-        super(RestoreImage, self).__init__()
+        super(DeleteOldImage, self).__init__()
         self.log = log
         self.lock = lock
         self.connections = connections
@@ -195,13 +195,15 @@ def image_name_from_header_path(fullpath):
     basename = os.path.basename(fullpath)
     return basename[:basename.find('.rbd__head')]
 
-def get_pool_paths(pool_id, object_list_file, hosts):
+def get_pool_paths(pool_id, object_list_file, hosts, ignore_snapshots=True):
     paths = {}
     for line in object_list_file.readlines():
         host, _, fullpath = line.strip().split(' ', 2)
         pool_prefix = 'current/' + pool_id + '.'
         # ignore snapshots
-        if pool_prefix in fullpath and '__head' in fullpath:
+        if pool_prefix in fullpath:
+            if ignore_snapshots and '__head' not in fullpath:
+                continue
             end = host.find('.osd')
             if end != -1:
                 host = host[:end]
@@ -342,7 +344,7 @@ def main():
     if args.user is None:
         args.user = getpass.getuser()
 
-    if args.delete_old_images and not args.yes_i_really_mean_it:
+    if args.delete_old_images and not args.yes_i_really_mean_it and not args.dry_run:
         print "You must specify the --yes-i-really-mean-it flag to delete old files"
         return
 
@@ -355,7 +357,7 @@ def main():
         action = 'restoring'
     log.info('%s rbd images from pool %s (id %s)', action, pool_name, pool_id)
 
-    paths_for_pool = get_pool_paths(pool_id, args.object_list, args.restrict_to_hosts)
+    paths_for_pool = get_pool_paths(pool_id, args.object_list, args.restrict_to_hosts, not args.delete_old_images)
     headers_in_pool = get_rbd_header_paths(paths_for_pool)
     num_images = len(headers_in_pool)
     q = Queue.Queue()
@@ -374,10 +376,10 @@ def main():
         data_paths = get_rbd_data_paths(paths_for_pool, block_name_prefix)
         if args.dry_run:
             for host, path in host_paths:
-                log.info('would %s %s:%s', action, host, path)
+                log.info('would be %s %s:%s', action, host, path)
             for paths in data_paths:
                 for host, path in paths:
-                    log.info('would %s %s:%s', action, host, path)
+                    log.info('would be %s %s:%s', action, host, path)
         else:
             q.put([data_paths, image_name, block_name_prefix, order, size])
 
