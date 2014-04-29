@@ -60,11 +60,12 @@ def delete_remote_file(log, lock, connections, user, host_paths):
     tries = 0
     while True:
         try:
-            hostname, fullpath = random.choice(host_paths)
-            conn = get_or_create_host_connection(lock, connections, user, hostname)
-            sftp_client = conn.open_sftp()
-            sftp_client.remove(fullpath)
-            sftp_client.close()
+            for hostname, fullpath in host_paths:
+                log.info('deleting %s:%s', hostname, fullpath)
+                conn = get_or_create_host_connection(lock, connections, user, hostname)
+                sftp_client = conn.open_sftp()
+                sftp_client.remove(fullpath)
+                sftp_client.close()
         except IOError:
             if len(host_paths) == 1:
                 log.error("all locations for %s returned an IOError", os.path.basename(fullpath))
