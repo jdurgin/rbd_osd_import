@@ -57,24 +57,16 @@ def delete_remote_file(log, lock, connections, user, host_paths):
     :type fullpath: list of tuples
     :returns: string - contents of file
     """
-    tries = 0
-    while True:
+    for hostname, fullpath in host_paths:
+        log.info('deleting %s:%s', hostname, fullpath)
         try:
-            for hostname, fullpath in host_paths:
-                log.info('deleting %s:%s', hostname, fullpath)
-                try:
-                    conn = get_or_create_host_connection(lock, connections, user, hostname)
-                    sftp_client = conn.open_sftp()
-                    sftp_client.remove(fullpath)
-                    sftp_client.close()
-                except IOError:
-                    log.debug('could not delete %s:%s', hostname, fullpath, exc_info=True)
-                    continue
-        except Exception:
-            if tries > 10:
-                raise
-            tries += 1
-            time.sleep(0.1)
+            conn = get_or_create_host_connection(lock, connections, user, hostname)
+            sftp_client = conn.open_sftp()
+            sftp_client.remove(fullpath)
+            sftp_client.close()
+        except IOError:
+            log.debug('could not delete %s:%s', hostname, fullpath, exc_info=True)
+            continue
 
 class RestoreImage(threading.Thread):
     def __init__(self, log, lock, connections, pool_name, user, q, result_q):
