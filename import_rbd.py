@@ -367,7 +367,11 @@ def main():
         image_name = image_name_from_header_path(host_paths[0][1])
         if args.images and image_name not in args.images:
             continue
-        header = read_remote_file(log, lock, connections, args.user, host_paths)
+        try:
+            header = read_remote_file(log, lock, connections, args.user, host_paths)
+        except IOError:
+            log.warn('header for %s is missing, skipping it', image_name)
+            continue
         block_name_prefix, order, size = parse_rbd_header(header)
         log.info('RBD image header for %s:', image_name)
         log.info('\tblock_name_prefix: %s', block_name_prefix)
