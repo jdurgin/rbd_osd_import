@@ -375,6 +375,8 @@ def main():
         log.info('\tsize: %d bytes', size)
         data_paths = get_rbd_data_paths(paths_for_pool, block_name_prefix)
         if args.dry_run:
+            for host, path in host_paths:
+                log.info('would %s %s:%s', action, host, path)
             for paths in data_paths:
                 for host, path in paths:
                     log.info('would %s %s:%s', action, host, path)
@@ -415,6 +417,9 @@ def main():
 
     if args.delete_old_images:
         for i, host_paths in enumerate(headers_in_pool):
+            image_name = image_name_from_header_path(host_paths[0][1])
+            if args.images and image_name not in args.images:
+                continue
             log.info('Removing header %d/%d', i, len(headers_in_pool))
             delete_remote_file(log, lock, connections, args.user, host_paths)
 
