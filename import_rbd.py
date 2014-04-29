@@ -51,6 +51,33 @@ def read_remote_file(log, lock, connections, user, host_paths):
             tries += 1
             time.sleep(0.1)
 
+def delete_remote_file(log, lock, connections, user, host_paths):
+    """
+    :param host_paths: tuples of hostname, fullpath
+    :type fullpath: list of tuples
+    :returns: string - contents of file
+    """
+    tries = 0
+    while True:
+        try:
+            hostname, fullpath = random.choice(host_paths)
+            conn = get_or_create_host_connection(lock, connections, user, hostname)
+            sftp_client = conn.open_sftp()
+            sftp_client.remove(fullpath)
+            sftp_client.close()
+        except IOError:
+            if len(host_paths) == 1:
+                log.error("all locations for %s returned an IOError", os.path.basename(fullpath))
+                raise
+            log.debug('error reading %s:%s, trying another path',
+                      hostname, fullpath, exc_info=True)
+            host_paths = [(host, path) for host, path in host_paths if path != fullpath or host != hostname]
+        except Exception:
+            if tries > 10:
+                raise
+            tries += 1
+            time.sleep(0.1)
+
 class RestoreImage(threading.Thread):
     def __init__(self, log, lock, connections, pool_name, user, q, result_q):
         super(RestoreImage, self).__init__()
@@ -99,6 +126,49 @@ class RestoreImage(threading.Thread):
                         offset = rbd_block_offset(block_name_prefix, order, obj_filename)
                         image.write(data, offset)
 
+class DeleteOldImage(threading.Thread):
+    def __init__(self, log, lock, connections, pool_name, user, q, result_q):
+        super(RestoreImage, self).__init__()
+        self.log = log
+        self.lock = lock
+        self.connections = connections
+        self.pool_name = pool_name
+        self.user = user
+        self.q = q
+        self.result_q = result_q
+
+    def run(self):
+        while True:
+            try:
+                item = self.q.get()
+                if item is None:
+                    self.result_q.put(None)
+                    return
+                paths, image_name, block_name_prefix, order, size = item
+                self.delete_image(paths, image_name, block_name_prefix, order, size)
+                self.result_q.put(image_name)
+            except Exception as e:
+                self.result_q.put(e)
+                self.log.exception('error deleting image %s', image_name)
+
+    def delete_image(self, paths, image_name, block_name_prefix, order, size):
+        error = None
+        num_objs = len(paths)
+        for i, host_paths in enumerate(paths):
+            obj_filename = os.path.basename(host_paths[0][1])
+            self.log.info('deleting object %s, %d/%d in image %s', obj_filename, i, num_objs, image_name)
+            try:
+                delete_remote_file(self.log,
+                                   self.lock,
+                                   self.connections,
+                                   self.user,
+                                   host_paths)
+            except Exception as e:
+                self.log.exception('error deleting object %s', obj_filename)
+                error = e
+        if error:
+            raise error
+
 def parse_rbd_header(header_contents):
     """
     :param header_contents: the rbd header as stored on disk
@@ -127,7 +197,7 @@ def image_name_from_header_path(fullpath):
     basename = os.path.basename(fullpath)
     return basename[:basename.find('.rbd__head')]
 
-def get_pool_paths(pool_id, object_list_file):
+def get_pool_paths(pool_id, object_list_file, hosts):
     paths = {}
     for line in object_list_file.readlines():
         host, _, fullpath = line.strip().split(' ', 2)
@@ -138,6 +208,9 @@ def get_pool_paths(pool_id, object_list_file):
             if end != -1:
                 host = host[:end]
             paths.setdefault(os.path.basename(fullpath), [])
+            # possibly restrict to specified hosts
+            if hosts and host not in hosts:
+                continue
             paths[os.path.basename(fullpath)].append((host, fullpath))
     return paths.values()
 
@@ -223,6 +296,29 @@ def parse_args():
         nargs='*',
         help='if specified, only restore the given images',
         )
+    parser.add_argument(
+        '--delete-old-images',
+        type=bool,
+        default=False,
+        help='if specified, only delete the given images, don\'t restore anything',
+        )
+    parser.add_argument(
+        '--yes-i-really-mean-it',
+        type=bool,
+        default=False,
+        help='allow deleting old files',
+        )
+    parser.add_argument(
+        '--dry-run',
+        type=bool,
+        default=False,
+        help='print out image files that would be deleted and exit',
+        )
+    parser.add_argument(
+        '--restrict-to-hosts',
+        nargs='*',
+        help='only delete/restore from specific hosts',
+        )
     return parser.parse_args()
 
 def main():
@@ -248,12 +344,20 @@ def main():
     if args.user is None:
         args.user = getpass.getuser()
 
+    if args.delete_old_images and not args.yes_i_really_mean_it:
+        print "You must specify the --yes-i-really-mean-it flag to delete old files"
+        return
+
     connections = {}
     pool_name = args.pool[0]
     pool_id = get_pool_id(args.pool_file, pool_name)
-    log.info('Restoring rbd images from pool %s (id %s)', pool_name, pool_id)
+    if args.delete_old_images:
+        action = 'deleting'
+    else:
+        action = 'restoring'
+    log.info('%s rbd images from pool %s (id %s)', action, pool_name, pool_id)
 
-    paths_for_pool = get_pool_paths(pool_id, args.object_list)
+    paths_for_pool = get_pool_paths(pool_id, args.object_list, args.restrict_to_hosts)
     headers_in_pool = get_rbd_header_paths(paths_for_pool)
     num_images = len(headers_in_pool)
     q = Queue.Queue()
@@ -270,15 +374,30 @@ def main():
         log.info('\torder: %d', order)
         log.info('\tsize: %d bytes', size)
         data_paths = get_rbd_data_paths(paths_for_pool, block_name_prefix)
-        q.put([data_paths, image_name, block_name_prefix, order, size])
+        if args.dry_run:
+            for paths in data_paths:
+                for host, path in paths:
+                    log.info('would %s %s:%s', action, host, path)
+        else:
+            q.put([data_paths, image_name, block_name_prefix, order, size])
+
+    if args.dry_run:
+        return
 
     for i in xrange(args.num_workers):
         q.put(None)
 
-    threads = [RestoreImage(log, lock, connections, pool_name, args.user, q, result_q) for i in xrange(args.num_workers)]
+    if args.delete_old_images:
+        threads = [DeleteOldImage(log, lock, connections, pool_name, args.user, q, result_q) for i in xrange(args.num_workers)]
+    else:
+        threads = [RestoreImage(log, lock, connections, pool_name, args.user, q, result_q) for i in xrange(args.num_workers)]
     for thread in threads:
         thread.start()
 
+    if args.delete_old_images:
+        action = 'deleting'
+    else:
+        action = 'restoring'
     i = 0
     finished = 0
     errors = 0
@@ -291,13 +410,18 @@ def main():
             errors += 1
             continue
         i += 1
-        log.info('Finished restoring image %s (%d/%d)',
-                 item, i, num_images)
+        log.info('Finished %s image %s (%d/%d)',
+                 action, item, i, num_images)
+
+    if args.delete_old_images:
+        for i, host_paths in enumerate(headers_in_pool):
+            log.info('Removing header %d/%d', i, len(headers_in_pool))
+            delete_remote_file(log, lock, connections, args.user, host_paths)
 
     if errors > 0:
-        log.error('Failed to restore %d images (see log for details)', errors)
+        log.error('Failed to %s %d images (see log for details)', action, errors)
     else:
-        log.info('Finished restoring all images in pool %s', pool_name)
+        log.info('Finished %s all images in pool %s', action, pool_name)
 
 if __name__ == '__main__':
     main()
