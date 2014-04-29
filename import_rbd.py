@@ -68,7 +68,7 @@ def delete_remote_file(log, lock, connections, user, host_paths):
                     sftp_client.remove(fullpath)
                     sftp_client.close()
                 except IOError:
-                    log.excepton('could not delete %s:%s', hostname, fullpath)
+                    log.exception('could not delete %s:%s', hostname, fullpath)
                     continue
         except Exception:
             if tries > 10:
