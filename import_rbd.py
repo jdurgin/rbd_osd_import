@@ -425,7 +425,10 @@ def main():
             if args.images and image_name not in args.images:
                 continue
             log.info('Removing header %d/%d', i, len(headers_in_pool))
-            delete_remote_file(log, lock, connections, args.user, host_paths)
+            try:
+                delete_remote_file(log, lock, connections, args.user, host_paths)
+            except IOError:
+                continue
 
     if errors > 0:
         log.error('Failed to %s %d images (see log for details)', action, errors)
