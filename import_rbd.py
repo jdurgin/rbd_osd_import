@@ -119,7 +119,9 @@ class RestoreImage(threading.Thread):
                                                 self.user,
                                                 host_paths)
                         offset = rbd_block_offset(block_name_prefix, order, obj_filename)
+                        self.log.debug('writing data to image')
                         image.write(data, offset)
+                        self.log.debug('finished restoring object %s (%d)', obj_filename, i)
 
 class DeleteOldImage(threading.Thread):
     def __init__(self, log, lock, connections, pool_name, user, q, result_q):
