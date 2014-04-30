@@ -34,8 +34,11 @@ def read_remote_file(log, lock, connections, user, host_paths):
             conn = get_or_create_host_connection(lock, connections, user, hostname)
             sftp_client = conn.open_sftp()
             with tempfile.NamedTemporaryFile() as temp:
+                log.debug('fetching %s:%s', hostname, fullpath)
                 sftp_client.get(fullpath, temp.name)
+                log.debug('fetched file to %s', temp.name)
                 sftp_client.close()
+                log.debug('closed sftp client')
                 temp.seek(0)
                 return temp.read()
         except IOError:
@@ -86,14 +89,14 @@ class RestoreImage(threading.Thread):
                 if item is None:
                     self.result_q.put(None)
                     return
-                paths, image_name, block_name_prefix, order, size = item
-                self.restore_image(paths, image_name, block_name_prefix, order, size)
+                paths, image_name, block_name_prefix, order, size, start_obj = item
+                self.restore_image(paths, image_name, block_name_prefix, order, size, start_obj)
                 self.result_q.put(image_name)
             except Exception as e:
                 self.result_q.put(e)
                 self.log.exception('error restoring image %s', image_name)
 
-    def restore_image(self, paths, image_name, block_name_prefix, order, size):
+    def restore_image(self, paths, image_name, block_name_prefix, order, size, start_obj):
         with rados.Rados(conffile='') as cluster:
             with cluster.open_ioctx(self.pool_name) as ioctx:
                 self.log.info('Creating image %s', image_name)
@@ -106,6 +109,8 @@ class RestoreImage(threading.Thread):
                 with rbd.Image(ioctx, image_name) as image:
                     num_objs = len(paths)
                     for i, host_paths in enumerate(paths):
+                        if i < start_obj:
+                            continue
                         obj_filename = os.path.basename(host_paths[0][1])
                         self.log.info('restoring object %s, %d/%d in image %s', obj_filename, i, num_objs, image_name)
                         data = read_remote_file(self.log,
@@ -134,7 +139,7 @@ class DeleteOldImage(threading.Thread):
                 if item is None:
                     self.result_q.put(None)
                     return
-                paths, image_name, block_name_prefix, order, size = item
+                paths, image_name, block_name_prefix, order, size, start_obj = item
                 self.delete_image(paths, image_name, block_name_prefix, order, size)
                 self.result_q.put(image_name)
             except Exception as e:
@@ -311,6 +316,12 @@ def parse_args():
         nargs='*',
         help='only delete/restore from specific hosts',
         )
+    parser.add_argument(
+        '--start-object',
+        type=int,
+        default=0,
+        help='which object to start at, as output during recovery (the x in x/y)'
+        )
     return parser.parse_args()
 
 def main():
@@ -343,6 +354,13 @@ def main():
     connections = {}
     pool_name = args.pool[0]
     pool_id = get_pool_id(args.pool_file, pool_name)
+    if args.start_object:
+        if args.delete_old_images:
+            print '--start-object only works when restoring, not deleting'
+            return
+        if not args.images or len(args.images) > 1:
+            print '--start-object must be used with exactly one image specified'
+            return
     if args.delete_old_images:
         action = 'deleting'
     else:
@@ -377,7 +395,7 @@ def main():
                 for host, path in paths:
                     log.info('would be %s %s:%s', action, host, path)
         else:
-            q.put([data_paths, image_name, block_name_prefix, order, size])
+            q.put([data_paths, image_name, block_name_prefix, order, size, args.start_object])
 
     if args.dry_run:
         return
@@ -423,7 +441,7 @@ def main():
                 continue
 
     if errors > 0:
-        log.error('Failed to %s %d images (see log for details)', action, errors)
+        log.error('Failed %s %d images (see log for details)', action, errors)
     else:
         log.info('Finished %s all images in pool %s', action, pool_name)
 
